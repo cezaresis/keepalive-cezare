@@ -1,1 +1,127 @@
+name: Gerar Calendário de Vencimentos
+
+on:
+  schedule:
+    - cron: '0 11 * * *'   # todo dia às 11:00 UTC (08:00 no horário de Brasília)
+  workflow_dispatch:         # permite rodar manualmente pelo botão "Run workflow"
+
+permissions:
+  contents: write
+
+jobs:
+  gerar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependências
+        run: pip install requests
+
+      - name: Gerar arquivo calendario.ics
+        run: |
+          python3 << 'EOF'
+          import requests
+          from datetime import datetime, timedelta
+
+          SUPABASE_URL = "https://wyslllzgyywykijkwydn.supabase.co"
+          ANON_KEY = "sb_publishable_HtfULQcDRItxRjVvbE-IxQ_DqbMT6jA"
+          HEADERS = {"apikey": ANON_KEY, "Authorization": f"Bearer {ANON_KEY}"}
+
+          def get(table, params=""):
+              r = requests.get(f"{SUPABASE_URL}/rest/v1/{table}?{params}", headers=HEADERS)
+              r.raise_for_status()
+              return r.json()
+
+          clientes = {c['id']: c['razao_social'] for c in get('clientes', 'select=id,razao_social')}
+          processos = get('processos', 'select=*')
+          produtos = get('produtos', 'select=*')
+
+          def esc(t):
+              t = str(t or '')
+              return t.replace('\\', '\\\\').replace(';', '\\;').replace(',', '\\,').replace('\n', '\\n')
+
+          lines = [
+              "BEGIN:VCALENDAR", "VERSION:2.0",
+              "PRODID:-//Cezare//RegistroCezare//PT", "CALSCALE:GREGORIAN",
+              "X-WR-CALNAME:Vencimentos Cezare",
+          ]
+
+          def add_event(uid, date_str, summary, desc, alarm_days=None, rrule=None):
+              dt = datetime.strptime(date_str, "%Y%m%d")
+              dt_end = (dt + timedelta(days=1)).strftime("%Y%m%d")
+              lines.append("BEGIN:VEVENT")
+              lines.append(f"UID:{uid}@registrocezare")
+              lines.append(f"DTSTAMP:{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}")
+              lines.append(f"DTSTART;VALUE=DATE:{date_str}")
+              lines.append(f"DTEND;VALUE=DATE:{dt_end}")
+              lines.append(f"SUMMARY:{esc(summary)}")
+              lines.append(f"DESCRIPTION:{esc(desc)}")
+              if rrule:
+                  lines.append(f"RRULE:{rrule}")
+              if alarm_days is not None:
+                  lines.append("BEGIN:VALARM")
+                  lines.append(f"TRIGGER:-P{int(alarm_days)}D")
+                  lines.append("ACTION:DISPLAY")
+                  lines.append(f"DESCRIPTION:{esc(summary)}")
+                  lines.append("END:VALARM")
+              lines.append("END:VEVENT")
+
+          for p in processos:
+              if p.get('status_manual') == 'concluido':
+                  continue
+              if p.get('renova') is False:
+                  continue
+              cliente_nome = clientes.get(p['cliente_id'], 'Cliente')
+              if p.get('aviso_mes_fixo'):
+                  mes = str(p['aviso_mes_fixo']).zfill(2)
+                  ano = datetime.utcnow().year
+                  add_event(
+                      f"proc-{p['id']}", f"{ano}{mes}01",
+                      f"Renovação: {p['tipo']} - {cliente_nome}",
+                      f"Licença/AFE nº {p.get('numero_licenca') or '-'}",
+                      alarm_days=0, rrule="FREQ=YEARLY"
+                  )
+              elif p.get('prazo'):
+                  dt = p['prazo'].replace('-', '')
+                  dias = p.get('aviso_dias') or 30
+                  add_event(
+                      f"proc-{p['id']}", dt,
+                      f"Vencimento: {p['tipo']} - {cliente_nome}",
+                      f"Licença/AFE nº {p.get('numero_licenca') or '-'} | Processo {p.get('numero_processo') or '-'}",
+                      alarm_days=dias
+                  )
+
+          for pr in produtos:
+              if not pr.get('possui_vencimento') or not pr.get('vencimento'):
+                  continue
+              cliente_nome = clientes.get(pr['cliente_id'], 'Cliente')
+              dt = pr['vencimento'].replace('-', '')
+              dias = pr.get('aviso_dias') or (360 if pr.get('classificacao') == 'registrado' else 180)
+              tipo_label = 'Registro' if pr.get('classificacao') == 'registrado' else 'Notificação'
+              add_event(
+                  f"prod-{pr['id']}", dt,
+                  f"Vencimento produto: {pr['nome']} - {cliente_nome}",
+                  f"{tipo_label} nº {pr.get('numero') or '-'}",
+                  alarm_days=dias
+              )
+
+          lines.append("END:VCALENDAR")
+
+          with open('calendario.ics', 'w', encoding='utf-8') as f:
+              f.write("\r\n".join(lines))
+
+          print(f"Gerado com {len(processos)} processos e {len(produtos)} produtos verificados.")
+          EOF
+
+      - name: Publicar o arquivo atualizado
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add calendario.ics
+          git diff --quiet --cached || git commit -m "Atualiza calendário de vencimentos"
+          git push
 
