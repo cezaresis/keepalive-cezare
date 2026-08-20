@@ -50,24 +50,20 @@ jobs:
               "X-WR-CALNAME:Vencimentos Cezare",
           ]
  
-          def add_event(uid, date_str, summary, desc, alarm_days=None, rrule=None):
-              dt = datetime.strptime(date_str, "%Y%m%d")
-              dt_end = (dt + timedelta(days=1)).strftime("%Y%m%d")
+          # O evento em si passa a "aparecer" já no dia do aviso (ex: 60 dias antes) e
+          # permanece visível todo dia até o vencimento, como uma faixa contínua.
+          # Não dependemos mais de VALARM porque o Google Calendário ignora alarmes
+          # em calendários assinados por link.
+          def add_event(uid, dtstart_str, dtend_str, summary, desc, rrule=None):
               lines.append("BEGIN:VEVENT")
               lines.append(f"UID:{uid}@registrocezare")
               lines.append(f"DTSTAMP:{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}")
-              lines.append(f"DTSTART;VALUE=DATE:{date_str}")
-              lines.append(f"DTEND;VALUE=DATE:{dt_end}")
+              lines.append(f"DTSTART;VALUE=DATE:{dtstart_str}")
+              lines.append(f"DTEND;VALUE=DATE:{dtend_str}")
               lines.append(f"SUMMARY:{esc(summary)}")
               lines.append(f"DESCRIPTION:{esc(desc)}")
               if rrule:
                   lines.append(f"RRULE:{rrule}")
-              if alarm_days is not None:
-                  lines.append("BEGIN:VALARM")
-                  lines.append(f"TRIGGER:-P{int(alarm_days)}D")
-                  lines.append("ACTION:DISPLAY")
-                  lines.append(f"DESCRIPTION:{esc(summary)}")
-                  lines.append("END:VALARM")
               lines.append("END:VEVENT")
  
           for p in processos:
@@ -79,34 +75,40 @@ jobs:
               if p.get('aviso_mes_fixo'):
                   mes = str(p['aviso_mes_fixo']).zfill(2)
                   ano = datetime.utcnow().year
+                  dtstart = f"{ano}{mes}01"
+                  dtend = (datetime.strptime(dtstart, "%Y%m%d") + timedelta(days=1)).strftime("%Y%m%d")
                   add_event(
-                      f"proc-{p['id']}", f"{ano}{mes}01",
+                      f"proc-{p['id']}", dtstart, dtend,
                       f"Renovação: {p['tipo']} - {cliente_nome}",
                       f"Licença/AFE nº {p.get('numero_licenca') or '-'}",
-                      alarm_days=0, rrule="FREQ=YEARLY"
+                      rrule="FREQ=YEARLY"
                   )
               elif p.get('prazo'):
-                  dt = p['prazo'].replace('-', '')
                   dias = p.get('aviso_dias') or 30
+                  vencimento_dt = datetime.strptime(p['prazo'], "%Y-%m-%d")
+                  aviso_dt = vencimento_dt - timedelta(days=dias)
+                  dtstart = aviso_dt.strftime("%Y%m%d")
+                  dtend = (vencimento_dt + timedelta(days=1)).strftime("%Y%m%d")
                   add_event(
-                      f"proc-{p['id']}", dt,
+                      f"proc-{p['id']}", dtstart, dtend,
                       f"Vencimento: {p['tipo']} - {cliente_nome}",
-                      f"Licença/AFE nº {p.get('numero_licenca') or '-'} | Processo {p.get('numero_processo') or '-'}",
-                      alarm_days=dias
+                      f"Licença/AFE nº {p.get('numero_licenca') or '-'} | Processo {p.get('numero_processo') or '-'} | Vence em {vencimento_dt.strftime('%d/%m/%Y')}"
                   )
  
           for pr in produtos:
               if not pr.get('possui_vencimento') or not pr.get('vencimento'):
                   continue
               cliente_nome = clientes.get(pr['cliente_id'], 'Cliente')
-              dt = pr['vencimento'].replace('-', '')
               dias = pr.get('aviso_dias') or (360 if pr.get('classificacao') == 'registrado' else 180)
+              vencimento_dt = datetime.strptime(pr['vencimento'], "%Y-%m-%d")
+              aviso_dt = vencimento_dt - timedelta(days=dias)
+              dtstart = aviso_dt.strftime("%Y%m%d")
+              dtend = (vencimento_dt + timedelta(days=1)).strftime("%Y%m%d")
               tipo_label = 'Registro' if pr.get('classificacao') == 'registrado' else 'Notificação'
               add_event(
-                  f"prod-{pr['id']}", dt,
+                  f"prod-{pr['id']}", dtstart, dtend,
                   f"Vencimento produto: {pr['nome']} - {cliente_nome}",
-                  f"{tipo_label} nº {pr.get('numero') or '-'}",
-                  alarm_days=dias
+                  f"{tipo_label} nº {pr.get('numero') or '-'} | Vence em {vencimento_dt.strftime('%d/%m/%Y')}"
               )
  
           lines.append("END:VCALENDAR")
